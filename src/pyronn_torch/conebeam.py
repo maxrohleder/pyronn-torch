@@ -8,7 +8,7 @@
 import numpy as np
 import scipy.linalg
 import torch
-
+from typing import Union
 import pyronn_torch
 
 
@@ -233,14 +233,60 @@ class ConeBeamProjector:
         self._source_points = torch.stack(
             tuple(map(torch.from_numpy, source_points))).float()
 
-        self._projection_multiplier = self._source_isocenter_distance * self._source_detector_distance * \
-            self._projection_spacing[-1] * np.pi / self._projection_shape[0]
+    def _calc_inverse_matrices_tensor(self, matrices: torch.Tensor) -> None:
+        """
+        Explanation
+        The projection matrix P consists of a camera intrinsic K, and the extrinsics
+        rotation R and translation t as P = K @ [R|t]. An alternative form uses the
+        camera center C in world coordinates as P = K @ [R|-RC] = [KR|-KRC].
+
+        Given P, we can obtain C = (KR)^-1 @ -(-KRC) = P[:3, :3]^-1 @ -P[:, 3].
+        This is equivalent to the nullspace form used above C = ker(P).
+
+        Furthermore, the inverse matrix M maps a point u = (u, v, 1) on the detector
+        onto a 3D ray direction r as r = Mu. It is defined as M = -(KR)^-1
+
+        The projector starts at the camera position C and steps along the ray
+        direction r for either forward or back projection. All points along the
+        line L = C + s*r, where s is in (0-sdd) are integrated over for the line
+        integral at detector position u.
+
+        For details see here https://ksimek.github.io/2012/08/22/extrinsic/
+
+        :param matrices: maps an homogenous voxel index x to a detector index u through u = Px. Shaped (p, 3, 4)
+        :return: None
+        """
+        with torch.no_grad():
+            p, _, _, = matrices.shape
+            assert matrices.dtype == torch.float32
+            assert not matrices.requires_grad
+            self._volume_origin_tensor = self._volume_origin_tensor.to(matrices.device)
+
+            self._projection_matrices = matrices
+            self._source_points = torch.zeros((p, 3), dtype=torch.float32, device=matrices.device)
+            self._inverse_matrices = torch.zeros((p, 3, 3), dtype=torch.float32, device=matrices.device)
+
+            # if the projection matrices are in pixel-from-voxel form, this has no effect
+            inv_scale = torch.diag(self._volume_spacing_tensor).to(matrices.device)
+
+            M = torch.linalg.inv(matrices[:, :3, :3])
+            for i in range(p):
+                self._source_points[i] = -M[i] @ matrices[i, :, 3] @ inv_scale - self._volume_origin_tensor @ inv_scale
+                self._inverse_matrices[i] = inv_scale @ M[i]
 
     @property
     def projection_matrices(self):
         return self._projection_matrices_numpy
 
     @projection_matrices.setter
-    def projection_matrices(self, numpy_matrices):
-        self._projection_matrices_numpy = numpy_matrices
-        self._calc_inverse_matrices()
+    def projection_matrices(self, matrices: Union[np.ndarray, torch.Tensor]):
+        if type(matrices) == np.ndarray:
+            self._projection_matrices_numpy = matrices
+            self._calc_inverse_matrices()
+        else:
+            self._projection_matrices_numpy = None
+            self._calc_inverse_matrices_tensor(matrices)
+
+    @property
+    def volume_shape(self):
+        return self._volume_shape
