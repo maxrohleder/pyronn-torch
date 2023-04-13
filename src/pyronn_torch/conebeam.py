@@ -45,10 +45,9 @@ class _ForwardProjection(torch.autograd.Function):
         else:
             return_none = False
 
-        volume = volume.float().cuda().contiguous()
         projection = torch.zeros(state.projection_shape,
                                  device='cuda',
-                                 requires_grad=volume.requires_grad).float().contiguous()
+                                 requires_grad=volume.requires_grad)
 
         assert pyronn_torch.cpp_extension
         if state.with_texture:
@@ -86,7 +85,6 @@ class _ForwardProjection(torch.autograd.Function):
         else:
             return_none = False
 
-        projection_grad = projection_grad.float().cuda().contiguous()
         volume_grad = torch.zeros(state.volume_shape,
                                   device='cuda',
                                   requires_grad=projection_grad.requires_grad)
