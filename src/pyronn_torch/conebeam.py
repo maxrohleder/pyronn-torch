@@ -110,22 +110,35 @@ class _BackwardProjection(torch.autograd.Function):
 class ConeBeamProjector:
     def __init__(self,
                  volume_shape,
-                 volume_spacing,
-                 volume_origin,
                  projection_shape,
-                 projection_spacing,
-                 projection_matrices,
+                 volume_spacing=np.ones(3),
+                 volume_origin=np.zeros(3),
+                 projection_spacing=np.ones(2),
+                 projection_matrices=None,
                  source_isocenter_distance=1,
                  source_detector_distance=1):
+        assert volume_shape.shape == (3,), "volume shape must be (d, h, w)"
+        assert projection_shape == (3,), "projection shape must be (#p, h, w)"
         self._volume_shape = volume_shape
-        self._volume_origin = volume_origin
-        self._volume_spacing = volume_spacing
         self._projection_shape = projection_shape
+
+        self._volume_origin = volume_origin
+        self._volume_origin_tensor = torch.tensor(volume_origin, dtype=torch.float32)
+
+        self._volume_spacing = volume_spacing
+        self._volume_spacing_tensor = torch.tensor(volume_spacing, dtype=torch.float32)
+
         self._projection_matrices_numpy = projection_matrices
         self._projection_spacing = projection_spacing
         self._source_isocenter_distance = source_isocenter_distance
         self._source_detector_distance = source_detector_distance
-        self._calc_inverse_matrices()
+
+        self._projection_multiplier = self._source_isocenter_distance * \
+                                      self._source_detector_distance * \
+                                      self._projection_spacing[-1] * \
+                                      np.pi / self._projection_shape[0]
+        if projection_matrices is not None:
+            self._calc_inverse_matrices()
 
     @classmethod
     def from_conrad_config(cls):
