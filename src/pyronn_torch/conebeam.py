@@ -109,16 +109,16 @@ class _BackwardProjection(torch.autograd.Function):
 
 class ConeBeamProjector:
     def __init__(self,
-                 volume_shape,
-                 projection_shape,
+                 volume_shape: tuple,
+                 projection_shape: tuple,
                  volume_spacing=np.ones(3),
                  volume_origin=np.zeros(3),
                  projection_spacing=np.ones(2),
                  projection_matrices=None,
                  source_isocenter_distance=1,
                  source_detector_distance=1):
-        assert volume_shape.shape == (3,), "volume shape must be (d, h, w)"
-        assert projection_shape == (3,), "projection shape must be (#p, h, w)"
+        assert len(volume_shape) == 3, f"volume shape must be (d, h, w), instead: {volume_shape}"
+        assert len(projection_shape) == 3, f"projection shape must be (#p, h, w). instead: {projection_shape}"
         self._volume_shape = volume_shape
         self._projection_shape = projection_shape
 
@@ -253,7 +253,7 @@ class ConeBeamProjector:
 
         For details see here https://ksimek.github.io/2012/08/22/extrinsic/
 
-        :param matrices: maps an homogenous voxel index x to a detector index u through u = Px. Shaped (p, 3, 4)
+        :param matrices: maps a homogenous voxel index x to a detector index u through u = Px. Shaped (p, 3, 4)
         :return: None
         """
         with torch.no_grad():
