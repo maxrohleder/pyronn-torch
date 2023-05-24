@@ -45,6 +45,9 @@ class _ForwardProjection(torch.autograd.Function):
         else:
             return_none = False
 
+        # strided/sliced tensor memory layout is not considered by custom kernel
+        assert volume.is_contiguous(), "Given volume must be in contiguous memory layout. Call '.contiguous()' first."
+
         projection = torch.zeros(state.projection_shape,
                                  device='cuda',
                                  requires_grad=volume.requires_grad)
@@ -84,6 +87,9 @@ class _ForwardProjection(torch.autograd.Function):
             return_none = True
         else:
             return_none = False
+
+        # strided/sliced tensor memory layout is not considered by custom kernel
+        assert projection_grad.is_contiguous(), "Given data must be contiguous in memory. Call '.contiguous()' first."
 
         volume_grad = torch.zeros(state.volume_shape,
                                   device='cuda',
