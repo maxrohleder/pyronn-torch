@@ -38,7 +38,7 @@ From this repository:
 
 .. code-block:: bash
 
-    git clone --recurse-submodules --recursive https://github.com/theHamsta/pyronn-torch.git
+    git clone --recurse-submodules --recursive https://github.com/maxrohleder/pyronn-torch.git
     cd pyronn-torch
     pip install torch
     pip install -e .
