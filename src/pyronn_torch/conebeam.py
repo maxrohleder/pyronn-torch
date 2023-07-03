@@ -8,7 +8,7 @@
 import numpy as np
 import scipy.linalg
 import torch
-
+from typing import Union
 import pyronn_torch
 
 
@@ -45,10 +45,12 @@ class _ForwardProjection(torch.autograd.Function):
         else:
             return_none = False
 
-        volume = volume.float().cuda().contiguous()
+        # strided/sliced tensor memory layout is not considered by custom kernel
+        assert volume.is_contiguous(), "Given volume must be in contiguous memory layout. Call '.contiguous()' first."
+
         projection = torch.zeros(state.projection_shape,
                                  device='cuda',
-                                 requires_grad=volume.requires_grad).float().contiguous()
+                                 requires_grad=volume.requires_grad)
 
         assert pyronn_torch.cpp_extension
         if state.with_texture:
@@ -86,7 +88,9 @@ class _ForwardProjection(torch.autograd.Function):
         else:
             return_none = False
 
-        projection_grad = projection_grad.float().cuda().contiguous()
+        # strided/sliced tensor memory layout is not considered by custom kernel
+        assert projection_grad.is_contiguous(), "Given data must be contiguous in memory. Call '.contiguous()' first."
+
         volume_grad = torch.zeros(state.volume_shape,
                                   device='cuda',
                                   requires_grad=projection_grad.requires_grad)
@@ -111,25 +115,36 @@ class _BackwardProjection(torch.autograd.Function):
 
 class ConeBeamProjector:
     def __init__(self,
-                 volume_shape,
-                 volume_spacing,
-                 volume_origin,
-                 projection_shape,
-                 projection_spacing,
-                 projection_origin,
-                 projection_matrices,
+                 volume_shape: tuple,
+                 projection_shape: tuple,
+                 volume_spacing=np.ones(3),
+                 volume_origin=np.zeros(3),
+                 projection_spacing=np.ones(2),
+                 projection_matrices=None,
                  source_isocenter_distance=1,
                  source_detector_distance=1):
+        assert len(volume_shape) == 3, f"volume shape must be (d, h, w), instead: {volume_shape}"
+        assert len(projection_shape) == 3, f"projection shape must be (#p, h, w). instead: {projection_shape}"
         self._volume_shape = volume_shape
-        self._volume_origin = volume_origin
-        self._volume_spacing = volume_spacing
         self._projection_shape = projection_shape
+
+        self._volume_origin = volume_origin
+        self._volume_origin_tensor = torch.tensor(volume_origin, dtype=torch.float32)
+
+        self._volume_spacing = volume_spacing
+        self._volume_spacing_tensor = torch.tensor(volume_spacing, dtype=torch.float32)
+
         self._projection_matrices_numpy = projection_matrices
         self._projection_spacing = projection_spacing
-        self._projection_origin = projection_origin
         self._source_isocenter_distance = source_isocenter_distance
         self._source_detector_distance = source_detector_distance
-        self._calc_inverse_matrices()
+
+        self._projection_multiplier = self._source_isocenter_distance * \
+                                      self._source_detector_distance * \
+                                      self._projection_spacing[-1] * \
+                                      np.pi / self._projection_shape[0]
+        if projection_matrices is not None:
+            self._calc_inverse_matrices()
 
     @classmethod
     def from_conrad_config(cls):
@@ -143,10 +158,6 @@ class ConeBeamProjector:
             pyconrad.config.get_geometry().getPixelDimensionX(),
             pyconrad.config.get_geometry().getPixelDimensionY(),
         ]
-        projection_origin = [
-            pyconrad.config.get_geometry().getDetectorOffsetU(),
-            pyconrad.config.get_geometry().getDetectorOffsetV(),
-        ]
         projection_matrices = pyconrad.config.get_projection_matrices()
 
         obj = cls(volume_shape=volume_shape,
@@ -154,7 +165,6 @@ class ConeBeamProjector:
                   volume_origin=volume_origin,
                   projection_shape=projection_shape,
                   projection_spacing=projection_spacing,
-                  projection_origin=projection_origin,
                   projection_matrices=projection_matrices)
         return obj
 
@@ -229,14 +239,60 @@ class ConeBeamProjector:
         self._source_points = torch.stack(
             tuple(map(torch.from_numpy, source_points))).float()
 
-        self._projection_multiplier = self._source_isocenter_distance * self._source_detector_distance * \
-            self._projection_spacing[-1] * np.pi / self._projection_shape[0]
+    def _calc_inverse_matrices_tensor(self, matrices: torch.Tensor) -> None:
+        """
+        Explanation
+        The projection matrix P consists of a camera intrinsic K, and the extrinsics
+        rotation R and translation t as P = K @ [R|t]. An alternative form uses the
+        camera center C in world coordinates as P = K @ [R|-RC] = [KR|-KRC].
+
+        Given P, we can obtain C = (KR)^-1 @ -(-KRC) = P[:3, :3]^-1 @ -P[:, 3].
+        This is equivalent to the nullspace form used above C = ker(P).
+
+        Furthermore, the inverse matrix M maps a point u = (u, v, 1) on the detector
+        onto a 3D ray direction r as r = Mu. It is defined as M = -(KR)^-1
+
+        The projector starts at the camera position C and steps along the ray
+        direction r for either forward or back projection. All points along the
+        line L = C + s*r, where s is in (0-sdd) are integrated over for the line
+        integral at detector position u.
+
+        For details see here https://ksimek.github.io/2012/08/22/extrinsic/
+
+        :param matrices: maps a homogenous voxel index x to a detector index u through u = Px. Shaped (p, 3, 4)
+        :return: None
+        """
+        with torch.no_grad():
+            p, _, _, = matrices.shape
+            assert matrices.dtype == torch.float32
+            assert not matrices.requires_grad
+            self._volume_origin_tensor = self._volume_origin_tensor.to(matrices.device)
+
+            self._projection_matrices = matrices
+            self._source_points = torch.zeros((p, 3), dtype=torch.float32, device=matrices.device)
+            self._inverse_matrices = torch.zeros((p, 3, 3), dtype=torch.float32, device=matrices.device)
+
+            # if the projection matrices are in pixel-from-voxel form, this has no effect
+            inv_scale = torch.diag(self._volume_spacing_tensor).to(matrices.device)
+
+            M = torch.linalg.inv(matrices[:, :3, :3])
+            for i in range(p):
+                self._source_points[i] = -M[i] @ matrices[i, :, 3] @ inv_scale - self._volume_origin_tensor @ inv_scale
+                self._inverse_matrices[i] = inv_scale @ M[i]
 
     @property
     def projection_matrices(self):
         return self._projection_matrices_numpy
 
     @projection_matrices.setter
-    def projection_matrices(self, numpy_matrices):
-        self._projection_matrices_numpy = numpy_matrices
-        self._calc_inverse_matrices()
+    def projection_matrices(self, matrices: Union[np.ndarray, torch.Tensor]):
+        if type(matrices) == np.ndarray:
+            self._projection_matrices_numpy = matrices
+            self._calc_inverse_matrices()
+        else:
+            self._projection_matrices_numpy = None
+            self._calc_inverse_matrices_tensor(matrices)
+
+    @property
+    def volume_shape(self):
+        return self._volume_shape

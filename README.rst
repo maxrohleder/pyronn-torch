@@ -70,7 +70,6 @@ Usage
         (-127.5, -127.5, -127.5),  # volume origin in mm
         (2, 480, 620),  # projection_shape (number of projections, height, width)
         [1.0, 1.0],  # projection_spacing in mm
-        (0, 0),  # projection_origin 
         np.array([[[-3.10e+2, -1.20e+03,  0.00e+00,  1.86e+5],
                    [-2.40e+2,  0.00e+00,  1.20e+03,  1.44e+5],
                    [-1.00e+00,  0.00e+00,  0.00e+00,  6.00e+2]],
